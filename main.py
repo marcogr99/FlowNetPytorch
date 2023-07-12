@@ -3,6 +3,7 @@ import os
 import time
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
@@ -36,7 +37,7 @@ group.add_argument('--split-value', default=0.8, type=float,
                    help='test-val split proportion between 0 (only test) and 1 (only train), '
                         'will be overwritten if a split file is set')
 parser.add_argument(
-    "--split-seed",
+    "--split-seed", 
     type=int,
     default=None,
     help="Seed the train-val split to enforce reproducibility (consistent restart too)",
@@ -88,6 +89,7 @@ parser.add_argument('--milestones', default=[100,150,200], metavar='N', nargs='*
 
 
 best_EPE = -1
+start_epoch = 1
 n_iter = int(start_epoch)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -110,8 +112,8 @@ def main():
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    if args.seed_split is not None:
-        np.random.seed(args.seed_split)
+    #if args.split_seed is not None:
+    #    np.random.seed(args.seed_split)
 
     train_writer = SummaryWriter(os.path.join(save_path,'train'))
     test_writer = SummaryWriter(os.path.join(save_path,'test'))
@@ -175,6 +177,70 @@ def main():
         print("=> creating model '{}'".format(args.arch))
 
     model = models.__dict__[args.arch](network_data).to(device)
+    ########################################################################
+     #aggiungo questo codice per addestrare gli ultimi 2 layer
+    #deconv3.0.weight 
+    #deconv2.0.weight
+    #'conv6.0.weight','conv6.0.bias','conv6_1.0.weight','conv6_1.0.bias','conv5_1.0.bias','conv5_1.0.weight','conv5.0.bias','conv5.0.weight','conv4_1.0.bias','conv4_1.0.weight','conv4.0.weight','conv4.0.bias'
+    #'deconv2.0.weight','deconv3.0.weight','conv3_1.0.bias','conv3_1.0.weight','conv3.0.bias','conv3.0.weight','conv2.0.bias','conv2.0.weight'
+    #'upsampled_flow3_to_2.weight','upsampled_flow4_to_3.weight','upsampled_flow5_to_4.weight','upsampled_flow6_to_5.weight',
+    #'deconv2.0.weight','deconv3.0.weight','deconv4.0.weight','deconv5.0.weight','conv6.0.weight','conv6.0.bias','conv6_1.0.weight','conv6_1.0.bias'
+    lista_layer=['predict_flow6.weight','predict_flow2.weight','predict_flow3.weight','predict_flow4.weight','predict_flow5.weight','upsampled_flow3_to_2.weight','upsampled_flow4_to_3.weight','upsampled_flow5_to_4.weight','upsampled_flow6_to_5.weight']
+    for param in model.parameters():
+        param.requires_grad = False
+
+    #model.conv6.requires_grad = True
+    #model.conv6_1.requires_grad = True
+    #for name, module in model.named_modules():
+         #print(name, module)
+    
+    # Verifica e modifica requires_grad dei parametri
+    for name, param in model.named_parameters():
+      print(name, param.requires_grad)  # Stampa lo stato attuale di requires_grad
+      # da inserire per congelare anche conv6 ---> or name=='conv4_1.0.bias' or name=='conv4_1.0.weight'or name=='conv4.0.weight'or name=='conv4.0.bias'or name=='conv5.0.bias'or name=='conv5.0.weight'
+      if name in lista_layer:  # Sostituisci 'nome_layer' con il nome del layer che vuoi addestrare
+        param.requires_grad = True  # Imposta requires_grad a True per il layer desiderato
+    for name, param in model.named_parameters():
+      print(name, param.requires_grad)
+
+    
+    #model.fc = torch.nn.Linear(512, 8) # assuming that the fc7 layer has 512 neurons, otherwise change it 
+    #model.cuda()   
+    #model.fc = torch.nn.Linear(in_features=model.fc.in_features, out_features=2)
+    '''
+    # Congela i parametri dei layer esistenti
+    for name, param in model.named_parameters():
+      if name not in ['conv6.weight', 'conv6.bias', 'conv6_1.weight', 'conv6_1.bias']:
+         param.requires_grad = False
+    model.conv6.requires_grad = True
+    model.conv6_1.requires_grad = True
+    # Modifica i due layer finali per adattarli alla nuova task
+    num_features = model.conv6.out_channels
+    model.conv6 = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1)
+    model.conv6_1 = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1)
+    '''
+    # Congela i parametri dei layer esistenti
+    '''
+    for name, param in model.named_parameters():
+         if name not in ['FlowNetS.conv6.weight', 'FlowNetS.conv6.bias', 'FlowNetS.conv6_1.weight', 'FlowNetS.conv6_1.bias']:
+            param.requires_grad = False
+
+    # Modifica i due layer finali per adattarli alla nuova task
+    num_features = model.FlowNetS.conv6[-1].out_channels
+    model.FlowNetS.conv6[-1] = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1)
+    model.FlowNetS.conv6_1[-1] = nn.Conv2d(in_channels=num_features, out_channels=num_features, kernel_size=3, stride=1, padding=1)
+
+    # Aggiungi un nuovo layer completamente connesso
+    model.fc = nn.Linear(in_features=num_features, out_features=2)
+
+
+    # Aggiungi un nuovo layer completamente connesso
+    #model.fc = nn.Linear(in_features=num_features, out_features=2)
+
+
+    #########################################################################
+    '''
+    
 
     assert(args.solver in ['adam', 'sgd'])
     print('=> setting {} solver'.format(args.solver))
@@ -197,19 +263,33 @@ def main():
         return
 
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=0.5)
-
+    x_train = []
+    x_test = []
+    EPEs_train = []
+    EPEs_test = []
+    loss_train=[]
+    count_train = 0
+    count_test = 0
     for epoch in range(args.start_epoch, args.epochs):
         scheduler.step()
 
         # train for one epoch
         train_loss, train_EPE = train(train_loader, model, optimizer, epoch, train_writer)
         train_writer.add_scalar('mean EPE', train_EPE, epoch)
+        EPEs_train.append(train_EPE)
+        loss_train.append(train_loss)
+        count_train +=1
+        x_train.append(count_train)
+
 
         # evaluate on validation set
 
         with torch.no_grad():
             EPE = validate(val_loader, model, epoch, output_writers)
         test_writer.add_scalar('mean EPE', EPE, epoch)
+        EPEs_test.append(EPE)
+        count_test +=1
+        x_test.append(count_test)
 
         if best_EPE < 0:
             best_EPE = EPE
@@ -224,6 +304,34 @@ def main():
             'div_flow': args.div_flow
         }, is_best, save_path)
 
+    import matplotlib.pyplot as plt
+    fig = plt.figure()
+    ax = fig.add_subplot()
+    ax.plot(x_train, EPEs_train)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('EPE')
+    plt.title('Neural Network Accuracy \n TRAIN')
+    plt.show
+
+    fig2 = plt.figure()
+    ax2 = fig2.add_subplot()
+    ax2.plot(x_test, EPEs_test, color = 'red')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('EPE')
+    plt.title('Neural Network Accuracy \n TEST')
+    plt.show()
+
+    fig3 = plt.figure()
+    ax3 = fig3.add_subplot()
+    ax3.plot(x_test,loss_train, color = 'red')
+    ax3.set_xlabel('Epoch')
+    ax3.set_ylabel('LOSS')
+    plt.title('Neural Network Accuracy \n TEST')
+    plt.show()
+
+############################################################################################################################
+                                                   # END MAIN
+############################################################################################################################
 
 def train(train_loader, model, optimizer, epoch, train_writer):
     global n_iter, args
@@ -257,6 +365,7 @@ def train(train_loader, model, optimizer, epoch, train_writer):
         flow2_EPE = args.div_flow * realEPE(output[0], target, sparse=args.sparse)
         # record loss and EPE
         losses.update(loss.item(), target.size(0))
+       
         train_writer.add_scalar('train_loss', loss.item(), n_iter)
         flow2_EPEs.update(flow2_EPE.item(), target.size(0))
 
@@ -280,11 +389,53 @@ def train(train_loader, model, optimizer, epoch, train_writer):
     return losses.avg, flow2_EPEs.avg
 
 
+'''
+def validate(val_loader, model, epoch, output_writers):
+    batch_time = AverageMeter()
+    EPEs = AverageMeter()
+
+    # switch to evaluate mode
+    model.eval()
+
+    end = time.time()
+
+    for i, (input, target) in enumerate(val_loader):
+        input = input.to(device)
+        target = target.to(device)
+
+        # compute output
+        output = model(input)
+
+        # compute loss
+        loss = multiscaleEPE(output, target, weights=args.multiscale_weights)
+
+        # measure accuracy and record loss
+        EPE = realEPE(output, target)
+        EPEs.update(EPE.item(), input.size(0))
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        # print progress
+        if i % args.print_freq == 0:
+            print('Test: [{0}/{1}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'EPE {EPE.val:.4f} ({EPE.avg:.4f})'.format(
+                   i, len(val_loader), batch_time=batch_time, EPE=EPEs))
+
+    print(' * EPE {EPE.avg:.3f}'.format(EPE=EPEs))
+
+    return EPEs.avg
+'''
+
 def validate(val_loader, model, epoch, output_writers):
     global args
 
     batch_time = AverageMeter()
     flow2_EPEs = AverageMeter()
+    
+    
 
     # switch to evaluate mode
     model.eval()
@@ -296,6 +447,9 @@ def validate(val_loader, model, epoch, output_writers):
 
         # compute output
         output = model(input)
+        
+       
+
         flow2_EPE = args.div_flow*realEPE(output, target, sparse=args.sparse)
         # record EPE
         flow2_EPEs.update(flow2_EPE.item(), target.size(0))
@@ -304,6 +458,7 @@ def validate(val_loader, model, epoch, output_writers):
         batch_time.update(time.time() - end)
         end = time.time()
 
+       
         if i < len(output_writers):  # log first output of first batches
             if epoch == args.start_epoch:
                 mean_values = torch.tensor([0.45,0.432,0.411], dtype=input.dtype).view(3,1,1)
@@ -315,7 +470,25 @@ def validate(val_loader, model, epoch, output_writers):
         if i % args.print_freq == 0:
             print('Test: [{0}/{1}]\t Time {2}\t EPE {3}'
                   .format(i, len(val_loader), batch_time, flow2_EPEs))
+            
+        
 
+    
+    '''
+    # aggiunto io
+    for images, labels in val_loader:
+        # Esegui l'inoltro (forward) del modello per ottenere le predizioni
+        outputs = model(images)
+        
+        # Calcola la loss utilizzando una funzione di loss appropriata (ad esempio CrossEntropyLoss)
+        loss = multiscaleEPE(outputs, target, weights=args.multiscale_weights, sparse=args.sparse)
+        
+        
+        # Aggiungi la loss alla loss totale di validazione
+        valid_loss += loss.item()
+    # aggiunto io
+    average_valid_loss = valid_loss / len(val_loader)
+    '''
     print(' * EPE {:.3f}'.format(flow2_EPEs.avg))
 
     return flow2_EPEs.avg

@@ -69,9 +69,9 @@ def main():
 
     img_pairs = []
     for ext in args.img_exts:
-        test_files = data_dir.files('*1.{}'.format(ext))
+        test_files = data_dir.files('*0.{}'.format(ext))
         for file in test_files:
-            img_pair = file.parent / (file.stem[:-1] + '2.{}'.format(ext))
+            img_pair = file.parent / (file.stem[:-1] + '1.{}'.format(ext))
             if img_pair.isfile():
                 img_pairs.append([file, img_pair])
 

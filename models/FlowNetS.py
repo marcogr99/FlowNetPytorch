@@ -50,6 +50,19 @@ class FlowNetS(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 constant_(m.weight, 1)
                 constant_(m.bias, 0)
+    
+    #aggiungo questo codice per addestrare gli ultimi 2 layer
+    '''
+    def set_trainable_parameters(self):
+        for param in self.parameters():
+            param.requires_grad = False
+
+        for param in self.conv6.parameters():
+            param.requires_grad = True
+
+        for param in self.conv6_1.parameters():
+            param.requires_grad = True
+    '''
 
     def forward(self, x):
         out_conv2 = self.conv2(self.conv1(x))
